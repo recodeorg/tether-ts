@@ -1,0 +1,2 @@
+# Do not fall back to .gitignore (which excludes dist).
+# The published tarball is controlled by package.json "files".
