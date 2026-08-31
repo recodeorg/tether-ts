@@ -1,6 +1,6 @@
 {
-  "name": "tether-ts",
-  "version": "1.0.3",
+  "name": "@tetherdb/client",
+  "version": "0.1.0",
   "description": "TypeScript client for Tether",
   "license": "ISC",
   "author": "wisplite",
@@ -13,6 +13,9 @@
       "types": "./dist/index.d.ts"
     }
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc",
