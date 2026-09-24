@@ -82,7 +82,7 @@ export class TetherClient {
         this.websocketHandler.close();
     };
     
-    subscribe = async (queryName: string, params: any, callback: (data: any) => void) => {
+    subscribe = (queryName: string, params: any, callback: (data: any) => void) => {
         const queryId = this.getCacheKey(queryName, params);
         if (!this.listeners.has(queryId)) {
             this.listeners.set(queryId, new Set())
