@@ -6,6 +6,8 @@ type PendingMutation = {
     timeoutId: ReturnType<typeof setTimeout>;
 };
 
+const MUTATION_TIMEOUT_MS = 10000;
+
 type Listener = (data: any) => void;
 
 type ActiveQuery = {
@@ -23,6 +25,12 @@ export class TetherClient {
     private queryCache = new Map<string, any>();
     private listeners = new Map<string, Set<Listener>>();
     private activeQueries = new Map<string, ActiveQuery>();
+
+    constructor() {
+        this.websocketHandler.shouldSendQueuedMutation = (mutationId) => {
+            return this.pendingMutations.has(mutationId);
+        };
+    }
 
     private normalizeParams = (params: unknown): Record<string, unknown> => {
         if (params == null || typeof params !== 'object' || Array.isArray(params)) {
@@ -144,11 +152,16 @@ export class TetherClient {
     
     sendMutation = (mutationName: string, params: any) => {
         const mutation_id = crypto.randomUUID();
+        const deadline = Date.now() + MUTATION_TIMEOUT_MS;
         const promise = new Promise((resolve, reject) => {
             const timeoutId = setTimeout(() => {
-                this.pendingMutations.delete(mutation_id);
+                if (!this.pendingMutations.delete(mutation_id)) {
+                    return;
+                }
+                // Not written yet. Remove it so a later open cannot run it after this rejection.
+                this.websocketHandler.dropQueuedMutation(mutation_id);
                 reject(new Error('Mutation timeout'));
-            }, 10000);
+            }, MUTATION_TIMEOUT_MS);
             this.pendingMutations.set(mutation_id, { resolve, reject, timeoutId });
         });
         this.websocketHandler.send(JSON.stringify({
@@ -156,7 +169,7 @@ export class TetherClient {
             location: mutationName,
             params: this.normalizeParams(params),
             mutation_id: mutation_id
-        }));
+        }), { mutationId: mutation_id, deadline });
         return promise;
     };
 

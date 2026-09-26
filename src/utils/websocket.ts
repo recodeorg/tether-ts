@@ -1,3 +1,9 @@
+type QueuedMessage = {
+    payload: string;
+    mutationId?: string;
+    deadline?: number;
+};
+
 type ServerMessage = {
     type: string;
     location?: string;
@@ -19,7 +25,16 @@ export class WebSocketHandler {
     private reconnectInterval: number = 1000;
     private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     private shouldReconnect: boolean = true;
-    private sendQueue: string[] = [];
+    // Offline mutations:
+    // Frames wait here until the socket is OPEN. A mutation frame carries its id
+    // and the deadline of its caller promise. If that promise is rejected before
+    // the frame is written (timeout, or disconnect clearing this queue), the frame
+    // is dropped and is not flushed on a later open. A frame already passed to
+    // socket.send is not recalled. Other frames stay queued until open. Close
+    // drops the whole queue; the client then sends auth and active subscriptions
+    // again when the socket opens.
+    private sendQueue: QueuedMessage[] = [];
+    public shouldSendQueuedMutation: (mutationId: string) => boolean = () => true;
     public onMutation: (mutation_id: string, data: unknown) => void = () => {};
     public onAuth: (data: any) => void = () => {};
     startConnection = (url: string) => {
@@ -31,10 +46,7 @@ export class WebSocketHandler {
         ws.onopen = () => {
             console.log('Connected to Tether');
             this.onOpen();
-            if (this.sendQueue.length > 0) {
-                this.sendQueue.forEach(message => this.ws?.send(message));
-                this.sendQueue = [];
-            }
+            this.flushSendQueue();
             this.reconnectAttempts = 0;
         };
 
@@ -112,12 +124,42 @@ export class WebSocketHandler {
         this.onClose();
     };
 
-    send = (message: string) => {
+    dropQueuedMutation = (mutationId: string) => {
+        this.sendQueue = this.sendQueue.filter((item) => item.mutationId !== mutationId);
+    };
+
+    send = (message: string, options?: { mutationId: string; deadline: number }) => {
         if (this.ws?.readyState !== WebSocket.OPEN) {
-            this.sendQueue.push(message);
+            this.sendQueue.push({
+                payload: message,
+                mutationId: options?.mutationId,
+                deadline: options?.deadline,
+            });
             return;
         }
         this.ws.send(message);
+    };
+
+    private flushSendQueue = () => {
+        const now = Date.now();
+        const queued = this.sendQueue;
+        this.sendQueue = [];
+        for (const item of queued) {
+            if (this.isStaleQueuedMutation(item, now)) {
+                continue;
+            }
+            this.ws?.send(item.payload);
+        }
+    };
+
+    private isStaleQueuedMutation = (item: QueuedMessage, now: number) => {
+        if (item.mutationId === undefined) {
+            return false;
+        }
+        if (item.deadline !== undefined && now >= item.deadline) {
+            return true;
+        }
+        return !this.shouldSendQueuedMutation(item.mutationId);
     };
 
 }
