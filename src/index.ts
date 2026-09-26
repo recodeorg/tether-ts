@@ -8,6 +8,12 @@ type PendingMutation = {
 
 type Listener = (data: any) => void;
 
+type ActiveQuery = {
+    queryName: string;
+    params: Record<string, unknown>;
+    queryKey: string;
+};
+
 export class TetherClient {
     private websocketHandler: WebSocketHandler = new WebSocketHandler();
     private pendingMutations = new Map<string, PendingMutation>();
@@ -16,27 +22,43 @@ export class TetherClient {
     private userInfo: Map<string, any> = new Map();
     private queryCache = new Map<string, any>();
     private listeners = new Map<string, Set<Listener>>();
+    private activeQueries = new Map<string, ActiveQuery>();
 
-    private getCacheKey = (queryName: string, params: any) => {
+    private normalizeParams = (params: unknown): Record<string, unknown> => {
+        if (params == null || typeof params !== 'object' || Array.isArray(params)) {
+            return {};
+        }
+        return { ...(params as Record<string, unknown>) };
+    };
+
+    private getCacheKey = (queryName: string, params: Record<string, unknown>) => {
         const sortedParams = Object.keys(params).sort().reduce<Record<string, unknown>>((acc, key) => {
             acc[key] = params[key];
             return acc;
         }, {});
         return `${queryName}:${JSON.stringify(sortedParams)}`;
-    }
+    };
+
+    private sendSubscribe = (query: ActiveQuery) => {
+        this.websocketHandler.send(JSON.stringify({
+            type: 'subscribe',
+            location: query.queryName,
+            params: query.params,
+            query_key: query.queryKey
+        }));
+    };
 
     getCache = (queryName: string, params: any) => {
-        return this.queryCache.get(this.getCacheKey(queryName, params));
-    }
+        return this.queryCache.get(this.getCacheKey(queryName, this.normalizeParams(params)));
+    };
     
     connect = (url: string) => {
-        this.websocketHandler.startConnection(url);
-        this.websocketHandler.onQuery = (query_id, data) => {
-            if (!query_id) {
+        this.websocketHandler.onQuery = (queryKey, data) => {
+            if (!queryKey || !this.activeQueries.has(queryKey)) {
                 return;
             }
-            this.queryCache.set(query_id, data);
-            const subs = this.listeners.get(query_id);
+            this.queryCache.set(queryKey, data);
+            const subs = this.listeners.get(queryKey);
             if (subs) {
                 subs.forEach(cb => cb(data));
             }
@@ -50,22 +72,24 @@ export class TetherClient {
             this.pendingMutations.delete(incoming_id);
             pending.resolve(data);
         };
-        this.websocketHandler.onAuth = (data) => {
+        this.websocketHandler.onAuth = (message) => {
+            if (message?.success === false) {
+                this.authenticated = false;
+                return;
+            }
             this.authenticated = true;
-            this.userInfo.set('user_id', data.user_id);
+            const userId = message?.data?.user_id;
+            if (userId !== undefined) {
+                this.userInfo.set('user_id', userId);
+            }
         };
         this.websocketHandler.onOpen = () => {
             this.websocketHandler.send(JSON.stringify({
                 type: 'auth',
                 token: this.token ?? ''
             }));
-            this.listeners.forEach((listeners, queryId) => {
-                this.websocketHandler.send(JSON.stringify({
-                    type: 'subscribe',
-                    location: queryId.split(':')[0],
-                    params: JSON.parse(queryId.split(':')[1]),
-                    query_id: queryId
-                }));
+            this.activeQueries.forEach((query) => {
+                this.sendSubscribe(query);
             });
         };
         this.websocketHandler.onClose = () => {
@@ -76,6 +100,7 @@ export class TetherClient {
             this.pendingMutations.clear();
             this.authenticated = false;
         };
+        this.websocketHandler.startConnection(url);
     };
     
     disconnect = () => {
@@ -83,32 +108,38 @@ export class TetherClient {
     };
     
     subscribe = (queryName: string, params: any, callback: (data: any) => void) => {
-        const queryId = this.getCacheKey(queryName, params);
-        if (!this.listeners.has(queryId)) {
-            this.listeners.set(queryId, new Set())
-            this.websocketHandler.send(JSON.stringify({
-                type: 'subscribe',
-                location: queryName,
-                params: params,
-                query_id: queryId
-            }));
+        const normalized = this.normalizeParams(params);
+        const queryKey = this.getCacheKey(queryName, normalized);
+        if (!this.listeners.has(queryKey)) {
+            this.listeners.set(queryKey, new Set());
+            const active: ActiveQuery = { queryName, params: normalized, queryKey };
+            this.activeQueries.set(queryKey, active);
+            this.sendSubscribe(active);
         }
-        this.listeners.get(queryId)!.add(callback);
+        this.listeners.get(queryKey)!.add(callback);
+
+        if (this.queryCache.has(queryKey)) {
+            callback(this.queryCache.get(queryKey));
+        }
 
         return () => {
-            const subs = this.listeners.get(queryId);
-            if (subs) {
-                subs.delete(callback);
-                if (subs.size === 0) {
-                    this.listeners.delete(queryId);
-                    this.queryCache.delete(queryId);
-                    this.websocketHandler.send(JSON.stringify({
-                        type: 'unsubscribe',
-                        query: queryId
-                    }));
-                }
+            const subs = this.listeners.get(queryKey);
+            if (!subs) {
+                return;
             }
-        }
+            subs.delete(callback);
+            if (subs.size === 0) {
+                this.listeners.delete(queryKey);
+                this.queryCache.delete(queryKey);
+                this.activeQueries.delete(queryKey);
+                this.websocketHandler.send(JSON.stringify({
+                    type: 'unsubscribe',
+                    location: queryName,
+                    params: normalized,
+                    query_key: queryKey
+                }));
+            }
+        };
     };
     
     sendMutation = (mutationName: string, params: any) => {
@@ -123,13 +154,13 @@ export class TetherClient {
         this.websocketHandler.send(JSON.stringify({
             type: 'mutation',
             location: mutationName,
-            params: params,
+            params: this.normalizeParams(params),
             mutation_id: mutation_id
         }));
         return promise;
     };
 
-    setToken = (token: string) => { // Function that returns a token
+    setToken = (token: string) => {
         this.token = token;
         this.websocketHandler.send(JSON.stringify({
             type: 'auth',

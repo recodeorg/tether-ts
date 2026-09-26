@@ -1,17 +1,30 @@
+type ServerMessage = {
+    type: string;
+    location?: string;
+    data?: unknown;
+    error?: string;
+    mutation_id?: string;
+    query_key?: string;
+    success?: boolean;
+};
+
 export class WebSocketHandler {
     private ws: WebSocket | null = null;
     private url: string = '';
     public onOpen: () => void = () => {};
-    public onQuery: (location: string | undefined, data: any) => void = () => {};
+    public onQuery: (queryKey: string | undefined, data: unknown) => void = () => {};
     public onClose: () => void = () => {};
     private reconnectAttempts: number = 0;
     private maxReconnectAttempts: number = 5;
     private reconnectInterval: number = 1000;
+    private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    private shouldReconnect: boolean = true;
     private sendQueue: string[] = [];
-    public onMutation: (mutation_id: string, data: any) => void = () => {};
+    public onMutation: (mutation_id: string, data: unknown) => void = () => {};
     public onAuth: (data: any) => void = () => {};
     startConnection = (url: string) => {
         this.url = url;
+        this.shouldReconnect = true;
         this.ws = new WebSocket(url);
         const ws = this.ws;
 
@@ -26,13 +39,7 @@ export class WebSocketHandler {
         };
 
         ws.onmessage = (event: MessageEvent) => {
-            let data: {
-                type: string;
-                location?: string;
-                data?: unknown;
-                error?: string;
-                mutation_id?: string;
-            };
+            let data: ServerMessage;
             try {
                 data = JSON.parse(String(event.data));
             } catch (e) {
@@ -40,13 +47,13 @@ export class WebSocketHandler {
                 return;
             }
             if (data.type === 'query') {
-                this.onQuery(data.location, data.data);
+                this.onQuery(data.query_key, data.data);
             } else if (data.type === 'mutation') {
                 this.onMutation(data.mutation_id || '', data.data);
             } else if (data.type === 'error') {
                 console.error(data.error);
             } else if (data.type === 'auth') {
-                this.onAuth(data.data);
+                this.onAuth(data);
             }
         };
 
@@ -60,25 +67,49 @@ export class WebSocketHandler {
                 'wasClean:',
                 event.wasClean
             );
-            this.attemptReconnect();
+            if (this.ws !== ws) {
+                return;
+            }
+            this.ws = null;
+            // Anything still queued never reached the server. Drop it so a
+            // reconnect cannot deliver a mutation whose promise was rejected.
+            this.sendQueue = [];
+            this.onClose();
+            if (this.shouldReconnect) {
+                this.attemptReconnect();
+            }
         };
     };
 
     attemptReconnect = () => {
-        this.ws?.close();
         this.reconnectAttempts++;
         if (this.reconnectAttempts > this.maxReconnectAttempts) {
             console.error('Max reconnect attempts reached');
             return;
         }
-        setTimeout(() => {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+        }
+        this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null;
+            if (!this.shouldReconnect) {
+                return;
+            }
             this.startConnection(this.url);
         }, this.reconnectInterval);
     };
 
     close = () => {
-        this.ws?.close();
+        this.shouldReconnect = false;
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+        this.sendQueue = [];
+        const ws = this.ws;
         this.ws = null;
+        ws?.close();
+        this.onClose();
     };
 
     send = (message: string) => {
@@ -86,7 +117,7 @@ export class WebSocketHandler {
             this.sendQueue.push(message);
             return;
         }
-        this.ws?.send(message);
+        this.ws.send(message);
     };
 
 }
