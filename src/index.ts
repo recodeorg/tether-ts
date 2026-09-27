@@ -85,7 +85,13 @@ export class TetherClient {
             this.queryCache.set(queryKey, data);
             const subs = this.listeners.get(queryKey);
             if (subs) {
-                subs.forEach(cb => cb(data));
+                subs.forEach(cb => {
+                    try {
+                        cb(data);
+                    } catch (error) {
+                        console.error('Tether: Listener threw an exception during update:', error);
+                    }
+                });
             }
         };
         this.websocketHandler.onMutation = (incoming_id, data) => {
@@ -145,7 +151,11 @@ export class TetherClient {
         this.listeners.get(queryKey)!.add(callback);
 
         if (this.queryCache.has(queryKey)) {
-            callback(this.queryCache.get(queryKey));
+            try {
+                callback(this.queryCache.get(queryKey));
+            } catch (error) {
+                console.error('Tether: Listener threw an exception during initial update:', error);
+            }
         }
 
         const storedParams = active.params;
