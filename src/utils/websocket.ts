@@ -128,6 +128,21 @@ export class WebSocketHandler {
         this.sendQueue = this.sendQueue.filter((item) => item.mutationId !== mutationId);
     };
 
+    // Auth frames carry a token. Mutation frames carry that user's params.
+    // Subscribe and unsubscribe frames stay queued.
+    dropQueuedUserData = () => {
+        this.sendQueue = this.sendQueue.filter((item) => {
+            if (item.mutationId !== undefined) {
+                return false;
+            }
+            try {
+                return (JSON.parse(item.payload) as { type?: string }).type !== 'auth';
+            } catch {
+                return true;
+            }
+        });
+    };
+
     send = (message: string, options?: { mutationId: string; deadline: number }) => {
         if (this.ws?.readyState !== WebSocket.OPEN) {
             this.sendQueue.push({

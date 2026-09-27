@@ -180,4 +180,26 @@ export class TetherClient {
             token: this.token ?? ''
         }));
     };
+
+    logout = () => {
+        this.token = null;
+        this.authenticated = false;
+        this.userInfo.clear();
+        this.queryCache.clear();
+        this.websocketHandler.dropQueuedUserData();
+        this.pendingMutations.forEach((pending) => {
+            clearTimeout(pending.timeoutId);
+            pending.reject(new Error('Logged out'));
+        });
+        this.pendingMutations.clear();
+        for (const subs of [...this.listeners.values()]) {
+            for (const callback of [...subs]) {
+                callback(undefined);
+            }
+        }
+        this.websocketHandler.send(JSON.stringify({
+            type: 'auth',
+            token: ''
+        }));
+    }
 }

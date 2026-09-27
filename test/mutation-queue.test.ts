@@ -10,6 +10,7 @@ type SentMessage = {
     location?: string;
     params?: Record<string, unknown>;
     mutation_id?: string;
+    query_key?: string;
     token?: string;
 };
 
@@ -241,5 +242,62 @@ describe('queued mutations', { concurrency: 1 }, () => {
         open(next.socket);
         assert.ok(parsed(next.socket).some((message) => message.type === 'auth'));
         assert.deepEqual(mutations(next.socket), []);
+    });
+
+    test('logout drops cached query data and tells subscribers to drop it', () => {
+        const { client, socket } = connect();
+        open(socket);
+        const seen: unknown[] = [];
+        client.subscribe('items', {}, (data) => {
+            seen.push(data);
+        });
+        const queryKey = parsed(socket).find((message) => message.type === 'subscribe')?.query_key;
+        assert.equal(typeof queryKey, 'string');
+
+        socket.onmessage?.({
+            data: JSON.stringify({
+                type: 'query',
+                query_key: queryKey,
+                data: { secret: 'prior-user' }
+            })
+        });
+        assert.deepEqual(client.getCache('items', {}), { secret: 'prior-user' });
+
+        client.setToken('prior-user-token');
+        client.logout();
+
+        assert.equal(client.getCache('items', {}), undefined);
+        assert.deepEqual(seen, [{ secret: 'prior-user' }, undefined]);
+        const auths = parsed(socket).filter((message) => message.type === 'auth');
+        assert.equal(auths.at(-1)?.token, '');
+
+        socket.onmessage?.({
+            data: JSON.stringify({
+                type: 'query',
+                query_key: queryKey,
+                data: { secret: 'next-user' }
+            })
+        });
+        assert.deepEqual(seen.at(-1), { secret: 'next-user' });
+        assert.deepEqual(client.getCache('items', {}), { secret: 'next-user' });
+    });
+
+    test('logout does not send the prior user token or queued mutations', async () => {
+        mock.timers.enable({ apis: ['setTimeout'] });
+        const client = new TetherClient();
+        client.setToken('prior-user-token');
+        client.subscribe('items', { id: 1 }, () => {});
+        const settled = rejectionOf(client.sendMutation('charge', { amount: 1 }));
+
+        client.logout();
+        const { socket } = connect(client);
+        open(socket);
+
+        assert.equal((await settled).message, 'Logged out');
+        const messages = parsed(socket);
+        assert.ok(messages.some((message) => message.type === 'subscribe'));
+        assert.ok(messages.some((message) => message.type === 'auth'));
+        assert.ok(messages.filter((message) => message.type === 'auth').every((message) => message.token === ''));
+        assert.deepEqual(mutations(socket), []);
     });
 });
