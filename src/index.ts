@@ -39,12 +39,29 @@ export class TetherClient {
         return { ...(params as Record<string, unknown>) };
     };
 
+    private canonicalizeParams = (params: any): any => {
+        if (params === null || typeof params !== 'object') {
+            return params;
+        }
+        if (Array.isArray(params)) {
+            return params.map(this.canonicalizeParams);
+        }
+        
+        const sortedKeys = Object.keys(params).sort();
+        const result: Record<string, any> = {};
+        for (const key of sortedKeys) {
+            result[key] = this.canonicalizeParams(params[key]);
+        }
+        return result;
+    }
+
+    // Detached recursive sort. The key and every later frame share this object.
+    private snapshotParams = (params: unknown): Record<string, unknown> => {
+        return this.canonicalizeParams(this.normalizeParams(params));
+    };
+
     private getCacheKey = (queryName: string, params: Record<string, unknown>) => {
-        const sortedParams = Object.keys(params).sort().reduce<Record<string, unknown>>((acc, key) => {
-            acc[key] = params[key];
-            return acc;
-        }, {});
-        return `${queryName}:${JSON.stringify(sortedParams)}`;
+        return `${queryName}:${JSON.stringify(this.canonicalizeParams(params))}`;
     };
 
     private sendSubscribe = (query: ActiveQuery) => {
@@ -57,7 +74,7 @@ export class TetherClient {
     };
 
     getCache = (queryName: string, params: any) => {
-        return this.queryCache.get(this.getCacheKey(queryName, this.normalizeParams(params)));
+        return this.queryCache.get(this.getCacheKey(queryName, this.snapshotParams(params)));
     };
     
     connect = (url: string) => {
@@ -116,11 +133,12 @@ export class TetherClient {
     };
     
     subscribe = (queryName: string, params: any, callback: (data: any) => void) => {
-        const normalized = this.normalizeParams(params);
-        const queryKey = this.getCacheKey(queryName, normalized);
-        if (!this.listeners.has(queryKey)) {
+        const snapshot = this.snapshotParams(params);
+        const queryKey = this.getCacheKey(queryName, snapshot);
+        let active = this.activeQueries.get(queryKey);
+        if (!active) {
             this.listeners.set(queryKey, new Set());
-            const active: ActiveQuery = { queryName, params: normalized, queryKey };
+            active = { queryName, params: snapshot, queryKey };
             this.activeQueries.set(queryKey, active);
             this.sendSubscribe(active);
         }
@@ -130,6 +148,7 @@ export class TetherClient {
             callback(this.queryCache.get(queryKey));
         }
 
+        const storedParams = active.params;
         return () => {
             const subs = this.listeners.get(queryKey);
             if (!subs) {
@@ -143,7 +162,7 @@ export class TetherClient {
                 this.websocketHandler.send(JSON.stringify({
                     type: 'unsubscribe',
                     location: queryName,
-                    params: normalized,
+                    params: storedParams,
                     query_key: queryKey
                 }));
             }
