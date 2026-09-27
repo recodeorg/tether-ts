@@ -25,6 +25,9 @@ export class WebSocketHandler {
     private maxReconnectInterval: number = 30000;
     private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     private shouldReconnect: boolean = true;
+    // Bumped when startConnection replaces the socket and when close() drops it.
+    // Handlers from an older generation must not touch callbacks, the send queue, or reconnect.
+    private connectionGeneration: number = 0;
     // Offline mutations:
     // Frames wait here until the socket is OPEN. A mutation frame carries its id
     // and the deadline of its caller promise. If that promise is rejected before
@@ -40,10 +43,17 @@ export class WebSocketHandler {
     startConnection = (url: string) => {
         this.url = url;
         this.shouldReconnect = true;
-        this.ws = new WebSocket(url);
-        const ws = this.ws;
+        this.cancelReconnect();
+
+        const previous = this.ws;
+        const generation = ++this.connectionGeneration;
+        const ws = new WebSocket(url);
+        this.ws = ws;
 
         ws.onopen = () => {
+            if (!this.isCurrentSocket(generation, ws)) {
+                return;
+            }
             console.log('Connected to Tether');
             this.onOpen();
             this.flushSendQueue();
@@ -51,6 +61,9 @@ export class WebSocketHandler {
         };
 
         ws.onmessage = (event: MessageEvent) => {
+            if (!this.isCurrentSocket(generation, ws)) {
+                return;
+            }
             let data: ServerMessage;
             try {
                 data = JSON.parse(String(event.data));
@@ -70,6 +83,9 @@ export class WebSocketHandler {
         };
 
         ws.onclose = (event: CloseEvent) => {
+            if (!this.isCurrentSocket(generation, ws)) {
+                return;
+            }
             console.log(
                 'Disconnected from Tether',
                 'code:',
@@ -79,9 +95,6 @@ export class WebSocketHandler {
                 'wasClean:',
                 event.wasClean
             );
-            if (this.ws !== ws) {
-                return;
-            }
             this.ws = null;
             // Anything still queued never reached the server. Drop it so a
             // reconnect cannot deliver a mutation whose promise was rejected.
@@ -91,12 +104,15 @@ export class WebSocketHandler {
                 this.attemptReconnect();
             }
         };
+
+        if (previous) {
+            this.retireSocket(previous);
+        }
     };
 
     attemptReconnect = () => {
-        if (this.reconnectTimer) {
-            clearTimeout(this.reconnectTimer);
-        }
+        this.cancelReconnect();
+        const generation = this.connectionGeneration;
         const backoff = Math.min(
             this.reconnectInterval * 2 ** Math.min(this.reconnectAttempts, 16),
             this.maxReconnectInterval
@@ -106,7 +122,7 @@ export class WebSocketHandler {
         this.reconnectAttempts++;
         this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = null;
-            if (!this.shouldReconnect) {
+            if (!this.shouldReconnect || generation !== this.connectionGeneration) {
                 return;
             }
             this.startConnection(this.url);
@@ -115,15 +131,36 @@ export class WebSocketHandler {
 
     close = () => {
         this.shouldReconnect = false;
+        this.cancelReconnect();
+        this.connectionGeneration += 1;
+        this.sendQueue = [];
+        const ws = this.ws;
+        this.ws = null;
+        if (ws) {
+            this.retireSocket(ws);
+        }
+        this.onClose();
+    };
+
+    private isCurrentSocket = (generation: number, ws: WebSocket) => {
+        return generation === this.connectionGeneration && this.ws === ws;
+    };
+
+    private cancelReconnect = () => {
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
         }
-        this.sendQueue = [];
-        const ws = this.ws;
-        this.ws = null;
-        ws?.close();
-        this.onClose();
+    };
+
+    private retireSocket = (ws: WebSocket) => {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        if (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN) {
+            ws.close();
+        }
     };
 
     dropQueuedMutation = (mutationId: string) => {
