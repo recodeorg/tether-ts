@@ -23,6 +23,7 @@ export class TetherClient {
     private authenticated: boolean = false;
     private userInfo: Map<string, any> = new Map();
     private queryCache = new Map<string, any>();
+    private queryTimestamps = new Map<string, number>();
     private listeners = new Map<string, Set<Listener>>();
     private activeQueries = new Map<string, ActiveQuery>();
 
@@ -60,6 +61,13 @@ export class TetherClient {
         return this.canonicalizeParams(this.normalizeParams(params));
     };
 
+    private readTimestamp = (timestamp: unknown): number | undefined => {
+        if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
+            return undefined;
+        }
+        return timestamp;
+    };
+
     private getCacheKey = (queryName: string, params: Record<string, unknown>) => {
         return `${queryName}:${JSON.stringify(this.canonicalizeParams(params))}`;
     };
@@ -78,9 +86,21 @@ export class TetherClient {
     };
     
     connect = (url: string) => {
-        this.websocketHandler.onQuery = (queryKey, data) => {
+        this.websocketHandler.onQuery = (queryKey, data, timestamp) => {
             if (!queryKey || !this.activeQueries.has(queryKey)) {
                 return;
+            }
+            // Drop a result older than the copy already cached for this query.
+            // A message with no timestamp still replaces the cache.
+            const incomingTimestamp = this.readTimestamp(timestamp);
+            if (incomingTimestamp !== undefined) {
+                const cachedTimestamp = this.queryTimestamps.get(queryKey);
+                if (cachedTimestamp !== undefined && incomingTimestamp < cachedTimestamp) {
+                    return;
+                }
+                this.queryTimestamps.set(queryKey, incomingTimestamp);
+            } else {
+                this.queryTimestamps.delete(queryKey);
             }
             this.queryCache.set(queryKey, data);
             const subs = this.listeners.get(queryKey);
@@ -168,6 +188,7 @@ export class TetherClient {
             if (subs.size === 0) {
                 this.listeners.delete(queryKey);
                 this.queryCache.delete(queryKey);
+                this.queryTimestamps.delete(queryKey);
                 this.activeQueries.delete(queryKey);
                 this.websocketHandler.send(JSON.stringify({
                     type: 'unsubscribe',
@@ -215,6 +236,7 @@ export class TetherClient {
         this.authenticated = false;
         this.userInfo.clear();
         this.queryCache.clear();
+        this.queryTimestamps.clear();
         this.websocketHandler.dropQueuedUserData();
         this.pendingMutations.forEach((pending) => {
             clearTimeout(pending.timeoutId);

@@ -11,6 +11,7 @@ type ServerMessage = {
     error?: string;
     mutation_id?: string;
     query_key?: string;
+    timestamp?: number;
     success?: boolean;
 };
 
@@ -18,7 +19,7 @@ export class WebSocketHandler {
     private ws: WebSocket | null = null;
     private url: string = '';
     public onOpen: () => void = () => {};
-    public onQuery: (queryKey: string | undefined, data: unknown) => void = () => {};
+    public onQuery: (queryKey: string | undefined, data: unknown, timestamp: unknown) => void = () => {};
     public onClose: () => void = () => {};
     private reconnectAttempts: number = 0;
     private reconnectInterval: number = 1000;
@@ -72,7 +73,7 @@ export class WebSocketHandler {
                 return;
             }
             if (data.type === 'query') {
-                this.onQuery(data.query_key, data.data);
+                this.onQuery(data.query_key, data.data, data.timestamp);
             } else if (data.type === 'mutation') {
                 this.onMutation(data.mutation_id || '', data.data);
             } else if (data.type === 'error') {

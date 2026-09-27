@@ -63,12 +63,13 @@ function open(socket: FakeWebSocket) {
     socket.onopen?.();
 }
 
-function queryMessage(queryKey: string, data: unknown) {
+function queryMessage(queryKey: string, data: unknown, timestamp?: number) {
     return {
         data: JSON.stringify({
             type: 'query',
             query_key: queryKey,
-            data
+            data,
+            ...(timestamp !== undefined ? { timestamp } : {})
         })
     };
 }
@@ -239,6 +240,37 @@ describe('query param protocol', { concurrency: 1 }, () => {
                 query_key: original?.query_key
             })
         );
+        client.disconnect();
+    });
+
+    test('drops a query result older than the cached timestamp', () => {
+        const client = new TetherClient();
+        const socket = connect(client);
+        open(socket);
+        const seen: unknown[] = [];
+        const unsubscribe = client.subscribe('items', {}, (data) => {
+            seen.push(data);
+        });
+        const queryKey = parsed(socket).find((message) => message.type === 'subscribe')?.query_key;
+        assert.equal(typeof queryKey, 'string');
+
+        socket.onmessage?.(queryMessage(queryKey!, { value: 'current' }, 20));
+        socket.onmessage?.(queryMessage(queryKey!, { value: 'stale' }, 10));
+        socket.onmessage?.(queryMessage(queryKey!, { value: 'same' }, 20));
+        socket.onmessage?.(queryMessage(queryKey!, { value: 'next' }, 21));
+
+        assert.deepEqual(seen, [
+            { value: 'current' },
+            { value: 'same' },
+            { value: 'next' }
+        ]);
+        assert.deepEqual(client.getCache('items', {}), { value: 'next' });
+
+        unsubscribe();
+        const resubscribe = client.subscribe('items', {}, () => {});
+        socket.onmessage?.(queryMessage(queryKey!, { value: 'fresh' }, 1));
+        assert.deepEqual(client.getCache('items', {}), { value: 'fresh' });
+        resubscribe();
         client.disconnect();
     });
 });
