@@ -21,8 +21,8 @@ export class WebSocketHandler {
     public onQuery: (queryKey: string | undefined, data: unknown) => void = () => {};
     public onClose: () => void = () => {};
     private reconnectAttempts: number = 0;
-    private maxReconnectAttempts: number = 5;
     private reconnectInterval: number = 1000;
+    private maxReconnectInterval: number = 30000;
     private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     private shouldReconnect: boolean = true;
     // Offline mutations:
@@ -94,21 +94,23 @@ export class WebSocketHandler {
     };
 
     attemptReconnect = () => {
-        this.reconnectAttempts++;
-        if (this.reconnectAttempts > this.maxReconnectAttempts) {
-            console.error('Max reconnect attempts reached');
-            return;
-        }
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
         }
+        const backoff = Math.min(
+            this.reconnectInterval * 2 ** Math.min(this.reconnectAttempts, 16),
+            this.maxReconnectInterval
+        );
+        // Jitter in [backoff / 2, backoff) so clients dropped together don't retry in lockstep.
+        const delay = backoff / 2 + Math.random() * (backoff / 2);
+        this.reconnectAttempts++;
         this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = null;
             if (!this.shouldReconnect) {
                 return;
             }
             this.startConnection(this.url);
-        }, this.reconnectInterval);
+        }, delay);
     };
 
     close = () => {
