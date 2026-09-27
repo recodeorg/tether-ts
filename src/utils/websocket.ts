@@ -143,6 +143,20 @@ export class WebSocketHandler {
         this.onClose();
     };
 
+    // Replace the live socket. startConnection bumps the connection generation,
+    // so handlers on the retired socket ignore late messages. Queued auth and
+    // mutations belong to the previous session and are not flushed. With no
+    // live connection, keep subscribe frames and drop auth and mutations only.
+    restart = () => {
+        if (this.url === '' || !this.shouldReconnect) {
+            this.dropQueuedUserData();
+            return;
+        }
+        this.sendQueue = [];
+        this.reconnectAttempts = 0;
+        this.startConnection(this.url);
+    };
+
     private isCurrentSocket = (generation: number, ws: WebSocket) => {
         return generation === this.connectionGeneration && this.ws === ws;
     };

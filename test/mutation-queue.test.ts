@@ -264,22 +264,176 @@ describe('queued mutations', { concurrency: 1 }, () => {
         assert.deepEqual(client.getCache('items', {}), { secret: 'prior-user' });
 
         client.setToken('prior-user-token');
+        const staleOpen = socket.onopen;
+        const staleMessage = socket.onmessage;
+        const sentOnOld = socket.sent.length;
         client.logout();
 
         assert.equal(client.getCache('items', {}), undefined);
         assert.deepEqual(seen, [{ secret: 'prior-user' }, undefined]);
-        const auths = parsed(socket).filter((message) => message.type === 'auth');
-        assert.equal(auths.at(-1)?.token, '');
+        assert.equal(socket.readyState, FakeWebSocket.CLOSED);
+        assert.equal(socket.sent.length, sentOnOld);
+        assert.deepEqual(
+            parsed(socket).filter((message) => message.type === 'auth').map((message) => message.token),
+            ['', 'prior-user-token']
+        );
 
-        socket.onmessage?.({
+        const next = sockets.at(-1);
+        assert.ok(next);
+        assert.notEqual(next, socket);
+        assert.equal(next?.readyState, FakeWebSocket.CONNECTING);
+        assert.equal(next?.sent.length, 0);
+
+        staleOpen?.();
+        staleMessage?.({
             data: JSON.stringify({
                 type: 'query',
                 query_key: queryKey,
-                data: { secret: 'next-user' }
+                timestamp: 1,
+                data: { secret: 'prior-user-late' }
             })
         });
-        assert.deepEqual(seen.at(-1), { secret: 'next-user' });
-        assert.deepEqual(client.getCache('items', {}), { secret: 'next-user' });
+        assert.equal(client.getCache('items', {}), undefined);
+        assert.deepEqual(seen, [{ secret: 'prior-user' }, undefined]);
+        assert.equal(next?.sent.length, 0);
+
+        open(next!);
+        assert.deepEqual(parsed(next!).map((message) => message.type), ['auth', 'subscribe']);
+        assert.deepEqual(
+            parsed(next!).filter((message) => message.type === 'auth').map((message) => message.token),
+            ['']
+        );
+        assert.equal(
+            parsed(next!).find((message) => message.type === 'subscribe')?.query_key,
+            queryKey
+        );
+
+        staleOpen?.();
+        staleMessage?.({
+            data: JSON.stringify({
+                type: 'query',
+                query_key: queryKey,
+                data: { secret: 'prior-user-late' }
+            })
+        });
+        next!.onmessage?.({
+            data: JSON.stringify({
+                type: 'query',
+                query_key: queryKey,
+                data: { secret: 'anonymous' }
+            })
+        });
+        assert.deepEqual(client.getCache('items', {}), { secret: 'anonymous' });
+        assert.deepEqual(seen.at(-1), { secret: 'anonymous' });
+        assert.equal(socket.readyState, FakeWebSocket.CLOSED);
+        assert.equal(next!.readyState, FakeWebSocket.OPEN);
+    });
+
+    test('logout still reconnects when a subscriber throws', () => {
+        const { client, socket } = connect();
+        open(socket);
+        const seen: unknown[] = [];
+        client.subscribe('items', {}, () => {
+            throw new Error('subscriber failed');
+        });
+        client.subscribe('items', {}, (data) => {
+            seen.push(data);
+        });
+        const logged: unknown[] = [];
+        const originalError = console.error;
+        console.error = (message: unknown) => {
+            logged.push(message);
+        };
+        try {
+            client.logout();
+        } finally {
+            console.error = originalError;
+        }
+
+        assert.deepEqual(seen, [undefined]);
+        assert.deepEqual(logged, ['Tether: Listener threw an exception during logout:']);
+        assert.equal(socket.readyState, FakeWebSocket.CLOSED);
+        const next = sockets.at(-1);
+        assert.notEqual(next, socket);
+        open(next!);
+        assert.deepEqual(
+            parsed(next!).filter((message) => message.type === 'auth').map((message) => message.token),
+            ['']
+        );
+    });
+
+    test('a throwing subscriber does not block query delivery to the others', () => {
+        const { client, socket } = connect();
+        open(socket);
+        const seen: unknown[] = [];
+        client.subscribe('items', {}, () => {
+            throw new Error('subscriber failed');
+        });
+        client.subscribe('items', {}, (data) => {
+            seen.push(data);
+        });
+        const queryKey = parsed(socket).find((message) => message.type === 'subscribe')?.query_key;
+        const logged: unknown[] = [];
+        const originalError = console.error;
+        console.error = (message: unknown) => {
+            logged.push(message);
+        };
+        try {
+            socket.onmessage?.({
+                data: JSON.stringify({
+                    type: 'query',
+                    query_key: queryKey,
+                    data: { secret: 'value' }
+                })
+            });
+        } finally {
+            console.error = originalError;
+        }
+
+        assert.deepEqual(logged, ['Tether: Listener threw an exception during update:']);
+        assert.deepEqual(seen, [{ secret: 'value' }]);
+        assert.deepEqual(client.getCache('items', {}), { secret: 'value' });
+    });
+
+    test('logout cancels a pending reconnect and opens one anonymous socket', () => {
+        mock.timers.enable({ apis: ['setTimeout'] });
+        const random = Math.random;
+        Math.random = () => 0;
+        try {
+            const { client, socket } = connect();
+            open(socket);
+            client.setToken('prior-user-token');
+            socket.readyState = FakeWebSocket.CLOSED;
+            socket.onclose?.({ code: 1006, reason: '', wasClean: false });
+            assert.equal(sockets.length, 1);
+
+            client.logout();
+            const next = sockets.at(-1);
+            assert.notEqual(next, socket);
+            assert.equal(sockets.length, 2);
+
+            mock.timers.tick(30_000);
+            assert.equal(sockets.length, 2);
+            open(next!);
+            assert.deepEqual(
+                parsed(next!).filter((message) => message.type === 'auth').map((message) => message.token),
+                ['']
+            );
+            assert.equal(socket.readyState, FakeWebSocket.CLOSED);
+            assert.equal(next!.readyState, FakeWebSocket.OPEN);
+        } finally {
+            Math.random = random;
+        }
+    });
+
+    test('logout after disconnect stays disconnected', () => {
+        const { client, socket } = connect();
+        open(socket);
+        client.setToken('prior-user-token');
+        client.disconnect();
+        client.logout();
+        assert.equal(sockets.length, 1);
+        assert.equal(socket.readyState, FakeWebSocket.CLOSED);
     });
 
     test('logout does not send the prior user token or queued mutations', async () => {

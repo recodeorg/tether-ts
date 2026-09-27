@@ -81,6 +81,24 @@ export class TetherClient {
         }));
     };
 
+    private callListener = (callback: Listener, data: unknown, when: string) => {
+        try {
+            callback(data);
+        } catch (error) {
+            console.error(`Tether: Listener threw an exception during ${when}:`, error);
+        }
+    };
+
+    private deliver = (queryKey: string, data: unknown, when: string) => {
+        const subs = this.listeners.get(queryKey);
+        if (!subs) {
+            return;
+        }
+        for (const callback of [...subs]) {
+            this.callListener(callback, data, when);
+        }
+    };
+
     getCache = (queryName: string, params: any) => {
         return this.queryCache.get(this.getCacheKey(queryName, this.snapshotParams(params)));
     };
@@ -103,16 +121,7 @@ export class TetherClient {
                 this.queryTimestamps.delete(queryKey);
             }
             this.queryCache.set(queryKey, data);
-            const subs = this.listeners.get(queryKey);
-            if (subs) {
-                subs.forEach(cb => {
-                    try {
-                        cb(data);
-                    } catch (error) {
-                        console.error('Tether: Listener threw an exception during update:', error);
-                    }
-                });
-            }
+            this.deliver(queryKey, data, 'update');
         };
         this.websocketHandler.onMutation = (incoming_id, data) => {
             const pending = this.pendingMutations.get(incoming_id);
@@ -171,11 +180,7 @@ export class TetherClient {
         this.listeners.get(queryKey)!.add(callback);
 
         if (this.queryCache.has(queryKey)) {
-            try {
-                callback(this.queryCache.get(queryKey));
-            } catch (error) {
-                console.error('Tether: Listener threw an exception during initial update:', error);
-            }
+            this.callListener(callback, this.queryCache.get(queryKey), 'initial update');
         }
 
         const storedParams = active.params;
@@ -231,26 +236,25 @@ export class TetherClient {
         }));
     };
 
+    // Drop the socket and open another one. A new connection has no server
+    // identity, so logout does not depend on the verifier accepting an empty
+    // token. The retired socket is a previous connection generation: a late
+    // query on it cannot refill the cache. Listeners run after the swap, and
+    // a throw in one of them cannot cancel it.
     logout = () => {
         this.token = null;
         this.authenticated = false;
         this.userInfo.clear();
         this.queryCache.clear();
         this.queryTimestamps.clear();
-        this.websocketHandler.dropQueuedUserData();
+        this.websocketHandler.restart();
         this.pendingMutations.forEach((pending) => {
             clearTimeout(pending.timeoutId);
             pending.reject(new Error('Logged out'));
         });
         this.pendingMutations.clear();
-        for (const subs of [...this.listeners.values()]) {
-            for (const callback of [...subs]) {
-                callback(undefined);
-            }
+        for (const queryKey of [...this.listeners.keys()]) {
+            this.deliver(queryKey, undefined, 'logout');
         }
-        this.websocketHandler.send(JSON.stringify({
-            type: 'auth',
-            token: ''
-        }));
-    }
+    };
 }
