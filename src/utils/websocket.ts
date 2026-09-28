@@ -9,8 +9,10 @@ type ServerMessage = {
     location?: string;
     data?: unknown;
     error?: string;
+    mutation?: string;
     mutation_id?: string;
     query_key?: string;
+    params?: unknown;
     timestamp?: number;
     success?: boolean;
 };
@@ -41,6 +43,7 @@ export class WebSocketHandler {
     public shouldSendQueuedMutation: (mutationId: string) => boolean = () => true;
     public onMutation: (mutation_id: string, data: unknown) => void = () => {};
     public onAuth: (data: any) => void = () => {};
+    public onError: (message: ServerMessage) => void = () => {};
     startConnection = (url: string) => {
         this.url = url;
         this.shouldReconnect = true;
@@ -77,7 +80,7 @@ export class WebSocketHandler {
             } else if (data.type === 'mutation') {
                 this.onMutation(data.mutation_id || '', data.data);
             } else if (data.type === 'error') {
-                console.error(data.error);
+                this.onError(data);
             } else if (data.type === 'auth') {
                 this.onAuth(data);
             }
