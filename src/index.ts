@@ -294,6 +294,7 @@ export class TetherClient {
             this.authenticated = false;
             this.userInfo.delete('user_id');
             this.emitAuth();
+            this.queryTimestamps.clear();
         };
         this.websocketHandler.startConnection(url);
     };
