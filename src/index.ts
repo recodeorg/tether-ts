@@ -51,6 +51,7 @@ export class TetherClient {
     private authListeners = new Set<AuthListener>();
     private authError: string | null = null;
     private lastAuthState: AuthState = { authenticated: false, userId: null, error: null };
+    private protocolVersion: number = 1;
 
     constructor() {
         this.websocketHandler.shouldSendQueuedMutation = (mutationId) => {
@@ -97,13 +98,23 @@ export class TetherClient {
         return `${queryName}:${JSON.stringify(this.canonicalizeParams(params))}`;
     };
 
-    private sendSubscribe = (query: ActiveQuery) => {
+    private sendFrame = (
+        frame: Record<string, unknown>,
+        options?: { mutationId: string; deadline: number }
+    ) => {
         this.websocketHandler.send(JSON.stringify({
+            ...frame,
+            protocol_version: this.protocolVersion
+        }), options);
+    };
+
+    private sendSubscribe = (query: ActiveQuery) => {
+        this.sendFrame({
             type: 'subscribe',
             location: query.queryName,
             params: query.params,
             query_key: query.queryKey
-        }));
+        });
     };
 
     private callListener = (callback: Listener, data: unknown, error: Error | null, when: string) => {
@@ -279,10 +290,10 @@ export class TetherClient {
             this.emitAuth();
         };
         this.websocketHandler.onOpen = () => {
-            this.websocketHandler.send(JSON.stringify({
+            this.sendFrame({
                 type: 'auth',
                 token: this.token ?? ''
-            }));
+            });
             this.activeQueries.forEach((query) => {
                 this.sendSubscribe(query);
             });
@@ -337,12 +348,12 @@ export class TetherClient {
                 this.queryErrors.delete(queryKey);
                 this.queryTimestamps.delete(queryKey);
                 this.activeQueries.delete(queryKey);
-                this.websocketHandler.send(JSON.stringify({
+                this.sendFrame({
                     type: 'unsubscribe',
                     location: queryName,
                     params: storedParams,
                     query_key: queryKey
-                }));
+                });
             }
         };
     };
@@ -361,21 +372,21 @@ export class TetherClient {
             }, MUTATION_TIMEOUT_MS);
             this.pendingMutations.set(mutation_id, { resolve, reject, timeoutId });
         });
-        this.websocketHandler.send(JSON.stringify({
+        this.sendFrame({
             type: 'mutation',
             location: mutationName,
             params: this.normalizeParams(params),
             mutation_id: mutation_id
-        }), { mutationId: mutation_id, deadline });
+        }, { mutationId: mutation_id, deadline });
         return promise;
     };
 
     setToken = (token: string) => {
         this.token = token;
-        this.websocketHandler.send(JSON.stringify({
+        this.sendFrame({
             type: 'auth',
             token: this.token ?? ''
-        }));
+        });
     };
 
     // Drop the socket and open another one. A new connection has no server

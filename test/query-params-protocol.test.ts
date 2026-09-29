@@ -10,6 +10,7 @@ type SentMessage = {
     params?: Record<string, unknown>;
     query_key?: string;
     token?: string;
+    protocol_version?: number;
 };
 
 class FakeWebSocket {
@@ -154,7 +155,8 @@ describe('query param protocol', { concurrency: 1 }, () => {
                 type: 'subscribe',
                 location: 'q',
                 params: canonical,
-                query_key: queryKey
+                query_key: queryKey,
+                protocol_version: 1
             })
         );
 
@@ -178,7 +180,8 @@ describe('query param protocol', { concurrency: 1 }, () => {
                 type: 'unsubscribe',
                 location: 'q',
                 params: canonical,
-                query_key: queryKey
+                query_key: queryKey,
+                protocol_version: 1
             })
         ]);
         client.disconnect();
@@ -237,7 +240,8 @@ describe('query param protocol', { concurrency: 1 }, () => {
                     items: [{ a: 2, b: 1 }],
                     nested: { c: 3, d: { y: 8, z: 9 } }
                 },
-                query_key: original?.query_key
+                query_key: original?.query_key,
+                protocol_version: 1
             })
         );
         client.disconnect();
@@ -271,6 +275,29 @@ describe('query param protocol', { concurrency: 1 }, () => {
         socket.onmessage?.(queryMessage(queryKey!, { value: 'fresh' }, 1));
         assert.deepEqual(client.getCache('items', {}), { value: 'fresh' });
         resubscribe();
+        client.disconnect();
+    });
+
+    test('every outgoing frame includes protocol_version', () => {
+        const client = new TetherClient();
+        const socket = connect(client);
+        open(socket);
+        client.setToken('tok');
+        const unsubscribe = client.subscribe('q', { b: 1, a: 2 }, () => {});
+        void client.sendMutation('m', { z: 1 }).catch(() => {});
+        unsubscribe();
+
+        const frames = parsed(socket);
+        assert.deepEqual(frames.map((frame) => frame.type), [
+            'auth',
+            'auth',
+            'subscribe',
+            'mutation',
+            'unsubscribe'
+        ]);
+        for (const frame of frames) {
+            assert.equal(frame.protocol_version, 1);
+        }
         client.disconnect();
     });
 });
